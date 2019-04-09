@@ -97,7 +97,7 @@ static off_t reuse_packfile_offset;
 static int use_bitmap_index_default = 1;
 static int use_bitmap_index = -1;
 static int write_bitmap_index;
-static uint16_t write_bitmap_options;
+static uint16_t write_bitmap_options = BITMAP_OPT_HASH_CACHE;
 
 static int exclude_promisor_objects;
 
@@ -111,6 +111,8 @@ static unsigned long window_memory_limit = 0;
 
 static struct list_objects_filter_options filter_options;
 
+static struct string_list uri_protocols = STRING_LIST_INIT_NODUP;
+
 enum missing_action {
 	MA_ERROR = 0,      /* fail if any missing objects are encountered */
 	MA_ALLOW_ANY,      /* silently allow ALL missing objects */
@@ -118,6 +120,15 @@ enum missing_action {
 };
 static enum missing_action arg_missing_action;
 static show_object_fn fn_show_object;
+
+struct configured_exclusion {
+	struct oidmap_entry e;
+	char *pack_hash_hex;
+	char *uri;
+};
+static struct oidmap configured_exclusions;
+
+static struct oidset excluded_by_config;
 
 /*
  * stats
@@ -271,12 +282,12 @@ static void copy_pack_data(struct hashfile *f,
 		off_t len)
 {
 	unsigned char *in;
-	unsigned long avail;
+	size_t avail;
 
 	while (len) {
 		in = use_pack(p, w_curs, offset, &avail);
 		if (avail > len)
-			avail = (unsigned long)len;
+			avail = xsize_t(len);
 		hashwrite(f, in, avail);
 		offset += avail;
 		len -= avail;
@@ -833,6 +844,25 @@ static off_t write_reused_pack(struct hashfile *f)
 	return reuse_packfile_offset - sizeof(struct pack_header);
 }
 
+static void write_excluded_by_configs(void)
+{
+	struct oidset_iter iter;
+	const struct object_id *oid;
+
+	oidset_iter_init(&excluded_by_config, &iter);
+	while ((oid = oidset_iter_next(&iter))) {
+		struct configured_exclusion *ex =
+			oidmap_get(&configured_exclusions, oid);
+
+		if (!ex)
+			BUG("configured exclusion wasn't configured");
+		write_in_full(1, ex->pack_hash_hex, strlen(ex->pack_hash_hex));
+		write_in_full(1, " ", 1);
+		write_in_full(1, ex->uri, strlen(ex->uri));
+		write_in_full(1, "\n", 1);
+	}
+}
+
 static const char no_split_warning[] = N_(
 "disabling bitmap writing, packs are split due to pack.packSizeLimit"
 );
@@ -1123,6 +1153,25 @@ static int want_object_in_pack(const struct object_id *oid,
 					  get_packed_git_mru(the_repository));
 			if (want != -1)
 				return want;
+		}
+	}
+
+	if (uri_protocols.nr) {
+		struct configured_exclusion *ex =
+			oidmap_get(&configured_exclusions, oid);
+		int i;
+		const char *p;
+
+		if (ex) {
+			for (i = 0; i < uri_protocols.nr; i++) {
+				if (skip_prefix(ex->uri,
+						uri_protocols.items[i].string,
+						&p) &&
+				    *p == ':') {
+					oidset_insert(&excluded_by_config, oid);
+					return 0;
+				}
+			}
 		}
 	}
 
@@ -1487,6 +1536,7 @@ static int can_reuse_delta(const unsigned char *base_sha1,
 			   struct object_entry **base_out)
 {
 	struct object_entry *base;
+	struct object_id base_oid;
 
 	if (!base_sha1)
 		return 0;
@@ -1508,10 +1558,9 @@ static int can_reuse_delta(const unsigned char *base_sha1,
 	 * even if it was buried too deep in history to make it into the
 	 * packing list.
 	 */
-	if (thin && bitmap_has_sha1_in_uninteresting(bitmap_git, base_sha1)) {
+	oidread(&base_oid, base_sha1);
+	if (thin && bitmap_has_oid_in_uninteresting(bitmap_git, &base_oid)) {
 		if (use_delta_islands) {
-			struct object_id base_oid;
-			hashcpy(base_oid.hash, base_sha1);
 			if (!in_same_island(&delta->idx.oid, &base_oid))
 				return 0;
 		}
@@ -1531,8 +1580,8 @@ static void check_object(struct object_entry *entry)
 		struct pack_window *w_curs = NULL;
 		const unsigned char *base_ref = NULL;
 		struct object_entry *base_entry;
-		unsigned long used, used_0;
-		unsigned long avail;
+		size_t used, used_0;
+		size_t avail;
 		off_t ofs;
 		unsigned char *buf, c;
 		enum object_type type;
@@ -1987,7 +2036,8 @@ unsigned long oe_get_size_slow(struct packing_data *pack,
 	struct pack_window *w_curs;
 	unsigned char *buf;
 	enum object_type type;
-	unsigned long used, avail, size;
+	unsigned long used, size;
+	size_t avail;
 
 	if (e->type_ != OBJ_OFS_DELTA && e->type_ != OBJ_REF_DELTA) {
 		packing_data_lock(&to_pack);
@@ -2727,6 +2777,29 @@ static int git_pack_config(const char *k, const char *v, void *cb)
 			    pack_idx_opts.version);
 		return 0;
 	}
+	if (!strcmp(k, "uploadpack.blobpackfileuri")) {
+		struct configured_exclusion *ex = xmalloc(sizeof(*ex));
+		const char *oid_end, *pack_end;
+		/*
+		 * Stores the pack hash. This is not a true object ID, but is
+		 * of the same form.
+		 */
+		struct object_id pack_hash;
+
+		if (parse_oid_hex(v, &ex->e.oid, &oid_end) ||
+		    *oid_end != ' ' ||
+		    parse_oid_hex(oid_end + 1, &pack_hash, &pack_end) ||
+		    *pack_end != ' ')
+			die(_("value of uploadpack.blobpackfileuri must be "
+			      "of the form '<object-hash> <pack-hash> <uri>' (got '%s')"), v);
+		if (oidmap_get(&configured_exclusions, &ex->e.oid))
+			die(_("object already configured in another "
+			      "uploadpack.blobpackfileuri (got '%s')"), v);
+		ex->pack_hash_hex = xcalloc(1, pack_end - oid_end);
+		memcpy(ex->pack_hash_hex, oid_end + 1, pack_end - oid_end - 1);
+		ex->uri = xstrdup(pack_end + 1);
+		oidmap_put(&configured_exclusions, ex);
+	}
 	return git_default_config(k, v, cb);
 }
 
@@ -3319,6 +3392,9 @@ int cmd_pack_objects(int argc, const char **argv, const char *prefix)
 			 N_("do not pack objects in promisor packfiles")),
 		OPT_BOOL(0, "delta-islands", &use_delta_islands,
 			 N_("respect islands during delta compression")),
+		OPT_STRING_LIST(0, "uri-protocol", &uri_protocols,
+				N_("protocol"),
+				N_("exclude any configured uploadpack.blobpackfileuri with this protocol")),
 		OPT_END(),
 	};
 
@@ -3503,6 +3579,7 @@ int cmd_pack_objects(int argc, const char **argv, const char *prefix)
 				    the_repository);
 	}
 
+	write_excluded_by_configs();
 	trace2_region_enter("pack-objects", "write-pack-file", the_repository);
 	write_pack_file();
 	trace2_region_leave("pack-objects", "write-pack-file", the_repository);

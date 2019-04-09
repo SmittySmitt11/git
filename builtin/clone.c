@@ -66,6 +66,7 @@ static int option_dissociate;
 static int max_jobs = -1;
 static struct string_list option_recurse_submodules = STRING_LIST_INIT_NODUP;
 static struct list_objects_filter_options filter_options;
+static struct string_list server_options = STRING_LIST_INIT_NODUP;
 
 static int recurse_submodules_cb(const struct option *opt,
 				 const char *arg, int unset)
@@ -137,6 +138,8 @@ static struct option builtin_clone_options[] = {
 		   N_("separate git dir from working tree")),
 	OPT_STRING_LIST('c', "config", &option_config, N_("key=value"),
 			N_("set config inside the new repository")),
+	OPT_STRING_LIST(0, "server-option", &server_options, N_("server-specific"),
+			N_("option to transmit")),
 	OPT_SET_INT('4', "ipv4", &family, N_("use IPv4 addresses only"),
 			TRANSPORT_FAMILY_IPV4),
 	OPT_SET_INT('6', "ipv6", &family, N_("use IPv6 addresses only"),
@@ -492,7 +495,7 @@ static enum {
 static const char junk_leave_repo_msg[] =
 N_("Clone succeeded, but checkout failed.\n"
    "You can inspect what was checked out with 'git status'\n"
-   "and retry the checkout with 'git checkout -f HEAD'\n");
+   "and retry with 'git restore --source=HEAD :/'\n");
 
 static void remove_junk(void)
 {
@@ -908,6 +911,10 @@ int cmd_clone(int argc, const char **argv, const char *prefix)
 
 	struct argv_array ref_prefixes = ARGV_ARRAY_INIT;
 
+	register_allowed_protocol_version(protocol_v2);
+	register_allowed_protocol_version(protocol_v1);
+	register_allowed_protocol_version(protocol_v0);
+
 	fetch_if_missing = 0;
 
 	packet_trace_identity("clone");
@@ -1135,6 +1142,9 @@ int cmd_clone(int argc, const char **argv, const char *prefix)
 	if (option_upload_pack)
 		transport_set_option(transport, TRANS_OPT_UPLOADPACK,
 				     option_upload_pack);
+
+	if (server_options.nr)
+		transport->server_options = &server_options;
 
 	if (filter_options.choice) {
 		struct strbuf expanded_filter_spec = STRBUF_INIT;

@@ -486,23 +486,24 @@ static int copy_notes_for_rebase(const struct am_state *state)
 
 	while (!strbuf_getline_lf(&sb, fp)) {
 		struct object_id from_obj, to_obj;
+		const char *p;
 
-		if (sb.len != GIT_SHA1_HEXSZ * 2 + 1) {
+		if (sb.len != the_hash_algo->hexsz * 2 + 1) {
 			ret = error(invalid_line, sb.buf);
 			goto finish;
 		}
 
-		if (get_oid_hex(sb.buf, &from_obj)) {
+		if (parse_oid_hex(sb.buf, &from_obj, &p)) {
 			ret = error(invalid_line, sb.buf);
 			goto finish;
 		}
 
-		if (sb.buf[GIT_SHA1_HEXSZ] != ' ') {
+		if (*p != ' ') {
 			ret = error(invalid_line, sb.buf);
 			goto finish;
 		}
 
-		if (get_oid_hex(sb.buf + GIT_SHA1_HEXSZ + 1, &to_obj)) {
+		if (get_oid_hex(p + 1, &to_obj)) {
 			ret = error(invalid_line, sb.buf);
 			goto finish;
 		}
@@ -1501,11 +1502,11 @@ static int fall_back_threeway(const struct am_state *state, const char *index_pa
 		 * review them with extra care to spot mismerges.
 		 */
 		struct rev_info rev_info;
-		const char *diff_filter_str = "--diff-filter=AM";
 
 		repo_init_revisions(the_repository, &rev_info, NULL);
 		rev_info.diffopt.output_format = DIFF_FORMAT_NAME_STATUS;
-		diff_opt_parse(&rev_info.diffopt, &diff_filter_str, 1, rev_info.prefix);
+		rev_info.diffopt.filter |= diff_filter_bit('A');
+		rev_info.diffopt.filter |= diff_filter_bit('M');
 		add_pending_oid(&rev_info, "HEAD", &our_tree, 0);
 		diff_setup_done(&rev_info.diffopt);
 		run_diff_index(&rev_info, 1);
@@ -1957,7 +1958,7 @@ static int clean_index(const struct object_id *head, const struct object_id *rem
 	if (merge_tree(remote_tree))
 		return -1;
 
-	remove_branch_state(the_repository);
+	remove_branch_state(the_repository, 0);
 
 	return 0;
 }

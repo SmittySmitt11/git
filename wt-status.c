@@ -178,9 +178,15 @@ static void wt_longstatus_print_unmerged_header(struct wt_status *s)
 		return;
 	if (s->whence != FROM_COMMIT)
 		;
-	else if (!s->is_initial)
-		status_printf_ln(s, c, _("  (use \"git reset %s <file>...\" to unstage)"), s->reference);
-	else
+	else if (!s->is_initial) {
+		if (!strcmp(s->reference, "HEAD"))
+			status_printf_ln(s, c,
+					 _("  (use \"git restore --index <file>...\" to unstage)"));
+		else
+			status_printf_ln(s, c,
+					 _("  (use \"git restore --source=%s --index <file>...\" to unstage)"),
+					 s->reference);
+	} else
 		status_printf_ln(s, c, _("  (use \"git rm --cached <file>...\" to unstage)"));
 
 	if (!both_deleted) {
@@ -205,9 +211,15 @@ static void wt_longstatus_print_cached_header(struct wt_status *s)
 		return;
 	if (s->whence != FROM_COMMIT)
 		; /* NEEDSWORK: use "git reset --unresolve"??? */
-	else if (!s->is_initial)
-		status_printf_ln(s, c, _("  (use \"git reset %s <file>...\" to unstage)"), s->reference);
-	else
+	else if (!s->is_initial) {
+		if (!strcmp(s->reference, "HEAD"))
+			status_printf_ln(s, c
+					 , _("  (use \"git restore --index <file>...\" to unstage)"));
+		else
+			status_printf_ln(s, c,
+					 _("  (use \"git restore --source=%s --index <file>...\" to unstage)"),
+					 s->reference);
+	} else
 		status_printf_ln(s, c, _("  (use \"git rm --cached <file>...\" to unstage)"));
 	status_printf_ln(s, c, "%s", "");
 }
@@ -225,7 +237,7 @@ static void wt_longstatus_print_dirty_header(struct wt_status *s,
 		status_printf_ln(s, c, _("  (use \"git add <file>...\" to update what will be committed)"));
 	else
 		status_printf_ln(s, c, _("  (use \"git add/rm <file>...\" to update what will be committed)"));
-	status_printf_ln(s, c, _("  (use \"git checkout -- <file>...\" to discard changes in working directory)"));
+	status_printf_ln(s, c, _("  (use \"git restore <file>...\" to discard changes in working directory)"));
 	if (has_dirty_submodules)
 		status_printf_ln(s, c, _("  (commit or discard the untracked or modified content in submodules)"));
 	status_printf_ln(s, c, "%s", "");
@@ -1006,13 +1018,19 @@ size_t wt_status_locate_end(const char *s, size_t len)
 	return len;
 }
 
-void wt_status_add_cut_line(FILE *fp)
+void wt_status_append_cut_line(struct strbuf *buf)
 {
 	const char *explanation = _("Do not modify or remove the line above.\nEverything below it will be ignored.");
+
+	strbuf_commented_addf(buf, "%s", cut_line);
+	strbuf_add_commented_lines(buf, explanation, strlen(explanation));
+}
+
+void wt_status_add_cut_line(FILE *fp)
+{
 	struct strbuf buf = STRBUF_INIT;
 
-	fprintf(fp, "%c %s", comment_line_char, cut_line);
-	strbuf_add_commented_lines(&buf, explanation, strlen(explanation));
+	wt_status_append_cut_line(&buf);
 	fputs(buf.buf, fp);
 	strbuf_release(&buf);
 }

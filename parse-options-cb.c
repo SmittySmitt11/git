@@ -22,8 +22,8 @@ int parse_opt_abbrev_cb(const struct option *opt, const char *arg, int unset)
 				     opt->long_name);
 		if (v && v < MINIMUM_ABBREV)
 			v = MINIMUM_ABBREV;
-		else if (v > 40)
-			v = 40;
+		else if (v > the_hash_algo->hexsz)
+			v = the_hash_algo->hexsz;
 	}
 	*(int *)(opt->value) = v;
 	return 0;
@@ -96,6 +96,23 @@ int parse_opt_commits(const struct option *opt, const char *arg, int unset)
 	return 0;
 }
 
+int parse_opt_commit(const struct option *opt, const char *arg, int unset)
+{
+	struct object_id oid;
+	struct commit *commit;
+	struct commit **target = opt->value;
+
+	if (!arg)
+		return -1;
+	if (get_oid(arg, &oid))
+		return error("malformed object name %s", arg);
+	commit = lookup_commit_reference(the_repository, &oid);
+	if (!commit)
+		return error("no such commit %s", arg);
+	*target = commit;
+	return 0;
+}
+
 int parse_opt_object_name(const struct option *opt, const char *arg, int unset)
 {
 	struct object_id oid;
@@ -112,6 +129,23 @@ int parse_opt_object_name(const struct option *opt, const char *arg, int unset)
 	return 0;
 }
 
+int parse_opt_object_id(const struct option *opt, const char *arg, int unset)
+{
+	struct object_id oid;
+	struct object_id *target = opt->value;
+
+	if (unset) {
+		*target = null_oid;
+		return 0;
+	}
+	if (!arg)
+		return -1;
+	if (get_oid(arg, &oid))
+		return error(_("malformed object name '%s'"), arg);
+	*target = oid;
+	return 0;
+}
+
 int parse_opt_tertiary(const struct option *opt, const char *arg, int unset)
 {
 	int *target = opt->value;
@@ -120,6 +154,23 @@ int parse_opt_tertiary(const struct option *opt, const char *arg, int unset)
 
 	*target = unset ? 2 : 1;
 	return 0;
+}
+
+struct option *parse_options_dup(const struct option *o)
+{
+	struct option *opts;
+	int nr = 0;
+
+	while (o && o->type != OPTION_END) {
+		nr++;
+		o++;
+	}
+
+	ALLOC_ARRAY(opts, nr + 1);
+	memcpy(opts, o - nr, sizeof(*o) * nr);
+	memset(opts + nr, 0, sizeof(*opts));
+	opts[nr].type = OPTION_END;
+	return opts;
 }
 
 struct option *parse_options_concat(struct option *a, struct option *b)

@@ -597,7 +597,7 @@ static struct cache_entry *read_one_ent(const char *which,
 					struct object_id *ent, const char *path,
 					int namelen, int stage)
 {
-	unsigned mode;
+	unsigned short mode;
 	struct object_id oid;
 	struct cache_entry *ce;
 
@@ -724,7 +724,7 @@ static int do_unresolve(int ac, const char **av,
 }
 
 static int do_reupdate(int ac, const char **av,
-		       const char *prefix, int prefix_length)
+		       const char *prefix)
 {
 	/* Read HEAD and run update-index on paths that are
 	 * merged and already different between index and HEAD.
@@ -940,8 +940,7 @@ static enum parse_opt_result reupdate_callback(
 
 	/* consume remaining arguments. */
 	setup_work_tree();
-	*has_errors = do_reupdate(ctx->argc, ctx->argv,
-				prefix, prefix ? strlen(prefix) : 0);
+	*has_errors = do_reupdate(ctx->argc, ctx->argv, prefix);
 	if (*has_errors)
 		active_cache_changed = 0;
 

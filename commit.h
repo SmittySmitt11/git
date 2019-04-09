@@ -32,7 +32,7 @@ struct commit {
 
 	/*
 	 * If the commit is loaded from the commit-graph file, then this
-	 * member may be NULL. Only access it through get_commit_tree()
+	 * member may be NULL. Only access it through repo_get_commit_tree()
 	 * or get_commit_tree_oid().
 	 */
 	struct tree *maybe_tree;
@@ -89,6 +89,12 @@ static inline int repo_parse_commit(struct repository *r, struct commit *item)
 {
 	return repo_parse_commit_gently(r, item, 0);
 }
+
+static inline int parse_commit_no_graph(struct commit *commit)
+{
+	return repo_parse_commit_internal(the_repository, commit, 0, 0);
+}
+
 #ifndef NO_THE_REPOSITORY_COMPATIBILITY_MACROS
 #define parse_commit_internal(item, quiet, use) repo_parse_commit_internal(the_repository, item, quiet, use)
 #define parse_commit_gently(item, quiet) repo_parse_commit_gently(the_repository, item, quiet)
@@ -143,7 +149,8 @@ void repo_unuse_commit_buffer(struct repository *r,
  */
 void free_commit_buffer(struct parsed_object_pool *pool, struct commit *);
 
-struct tree *get_commit_tree(const struct commit *);
+struct tree *repo_get_commit_tree(struct repository *, const struct commit *);
+#define get_commit_tree(c) repo_get_commit_tree(the_repository, c)
 struct object_id *get_commit_tree_oid(const struct commit *);
 
 /*
@@ -257,6 +264,10 @@ extern void setup_alternate_shallow(struct lock_file *shallow_lock,
 extern const char *setup_temporary_shallow(const struct oid_array *extra);
 extern void advertise_shallow_grafts(int);
 
+/*
+ * Initialize with prepare_shallow_info() or zero-initialize (equivalent to
+ * prepare_shallow_info with a NULL oid_array).
+ */
 struct shallow_info {
 	struct oid_array *shallow;
 	int *ours, nr_ours;

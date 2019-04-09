@@ -761,6 +761,10 @@ static int show_stash(int argc, const char **argv, const char *prefix)
 		free_stash_info(&info);
 		usage_with_options(git_stash_show_usage, options);
 	}
+	if (!rev.diffopt.output_format) {
+		rev.diffopt.output_format = DIFF_FORMAT_PATCH;
+		diff_setup_done(&rev.diffopt);
+	}
 
 	rev.diffopt.flags.recursive = 1;
 	setup_diff_pager(&rev.diffopt);
@@ -1276,7 +1280,7 @@ static int do_push_stash(const struct pathspec *ps, const char *stash_msg, int q
 			ce_path_match(&the_index, active_cache[i], ps,
 				      ps_matched);
 
-		if (report_path_error(ps_matched, ps, NULL)) {
+		if (report_path_error(ps_matched, ps)) {
 			fprintf_ln(stderr, _("Did you forget to 'git add'?"));
 			ret = -1;
 			free(ps_matched);

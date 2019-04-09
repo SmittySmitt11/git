@@ -33,13 +33,13 @@ test_expect_success 'create commits and repack' '
 	git repack
 '
 
-graph_git_two_modes() {
+graph_git_two_modes () {
 	git -c core.commitGraph=true $1 >output
 	git -c core.commitGraph=false $1 >expect
 	test_cmp expect output
 }
 
-graph_git_behavior() {
+graph_git_behavior () {
 	MSG=$1
 	DIR=$2
 	BRANCH=$3
@@ -56,7 +56,7 @@ graph_git_behavior() {
 
 graph_git_behavior 'no graph' full commits/3 commits/1
 
-graph_read_expect() {
+graph_read_expect () {
 	OPTIONAL=""
 	NUM_CHUNKS=3
 	if test ! -z $2
@@ -65,7 +65,8 @@ graph_read_expect() {
 		NUM_CHUNKS=$((3 + $(echo "$2" | wc -w)))
 	fi
 	cat >expect <<- EOF
-	header: 43475048 1 1 $NUM_CHUNKS 0
+	header: 43475048 2 $NUM_CHUNKS 1 0
+	hash algorithm: 73686131
 	num_commits: $1
 	chunks: oid_fanout oid_lookup commit_metadata$OPTIONAL
 	EOF
@@ -75,7 +76,7 @@ graph_read_expect() {
 
 test_expect_success 'write graph' '
 	cd "$TRASH_DIRECTORY/full" &&
-	graph1=$(git commit-graph write) &&
+	git commit-graph write &&
 	test_path_is_file $objdir/info/commit-graph &&
 	graph_read_expect "3"
 '
@@ -328,7 +329,7 @@ test_expect_success 'replace-objects invalidates commit-graph' '
 
 test_expect_success 'git commit-graph verify' '
 	cd "$TRASH_DIRECTORY/full" &&
-	git rev-parse commits/8 | git commit-graph write --stdin-commits &&
+	git rev-parse commits/8 | git commit-graph write --stdin-commits --version=1 &&
 	git commit-graph verify >output
 '
 
@@ -366,28 +367,57 @@ GRAPH_OCTOPUS_DATA_OFFSET=$(($GRAPH_COMMIT_DATA_OFFSET + \
 GRAPH_BYTE_OCTOPUS=$(($GRAPH_OCTOPUS_DATA_OFFSET + 4))
 GRAPH_BYTE_FOOTER=$(($GRAPH_OCTOPUS_DATA_OFFSET + 4 * $NUM_OCTOPUS_EDGES))
 
+corrupt_graph_setup() {
+	cd "$TRASH_DIRECTORY/full" &&
+	test_when_finished mv commit-graph-backup $objdir/info/commit-graph &&
+	cp $objdir/info/commit-graph commit-graph-backup
+}
+
+corrupt_graph_verify() {
+	grepstr=$1
+	test_must_fail git commit-graph verify 2>test_err &&
+	grep -v "^+" test_err >err &&
+	test_i18ngrep "$grepstr" err &&
+	if test "$2" != "no-copy"
+	then
+		cp $objdir/info/commit-graph commit-graph-pre-write-test
+	fi &&
+	git status --short &&
+	GIT_TEST_COMMIT_GRAPH_DIE_ON_LOAD=true git commit-graph write &&
+	git commit-graph verify
+}
+
 # usage: corrupt_graph_and_verify <position> <data> <string> [<zero_pos>]
 # Manipulates the commit-graph file at the position
 # by inserting the data, optionally zeroing the file
 # starting at <zero_pos>, then runs 'git commit-graph verify'
 # and places the output in the file 'err'. Test 'err' for
 # the given string.
-corrupt_graph_and_verify() {
+corrupt_graph_and_verify () {
 	pos=$1
 	data="${2:-\0}"
 	grepstr=$3
-	cd "$TRASH_DIRECTORY/full" &&
+	corrupt_graph_setup &&
 	orig_size=$(wc -c < $objdir/info/commit-graph) &&
 	zero_pos=${4:-${orig_size}} &&
-	test_when_finished mv commit-graph-backup $objdir/info/commit-graph &&
-	cp $objdir/info/commit-graph commit-graph-backup &&
 	printf "$data" | dd of="$objdir/info/commit-graph" bs=1 seek="$pos" conv=notrunc &&
 	dd of="$objdir/info/commit-graph" bs=1 seek="$zero_pos" if=/dev/null &&
 	generate_zero_bytes $(($orig_size - $zero_pos)) >>"$objdir/info/commit-graph" &&
-	test_must_fail git commit-graph verify 2>test_err &&
-	grep -v "^+" test_err >err &&
-	test_i18ngrep "$grepstr" err
+	corrupt_graph_verify "$grepstr"
+
 }
+
+test_expect_success POSIXPERM,SANITY 'detect permission problem' '
+	corrupt_graph_setup &&
+	chmod 000 $objdir/info/commit-graph &&
+	corrupt_graph_verify "Could not open" "no-copy"
+'
+
+test_expect_success 'detect too small' '
+	corrupt_graph_setup &&
+	echo "a small graph" >$objdir/info/commit-graph &&
+	corrupt_graph_verify "too small"
+'
 
 test_expect_success 'detect bad signature' '
 	corrupt_graph_and_verify 0 "\0" \
@@ -395,10 +425,14 @@ test_expect_success 'detect bad signature' '
 '
 
 test_expect_success 'detect bad version' '
-	corrupt_graph_and_verify $GRAPH_BYTE_VERSION "\02" \
+	corrupt_graph_and_verify $GRAPH_BYTE_VERSION "\03" \
 		"graph version"
 '
 
+test_expect_success 'detect version 2 with version 1 data' '
+	corrupt_graph_and_verify $GRAPH_BYTE_VERSION "\02" \
+		"reachability index version"
+'
 test_expect_success 'detect bad hash version' '
 	corrupt_graph_and_verify $GRAPH_BYTE_HASH "\02" \
 		"hash version"
@@ -499,7 +533,39 @@ test_expect_success 'git fsck (checks commit-graph)' '
 	git fsck &&
 	corrupt_graph_and_verify $GRAPH_BYTE_FOOTER "\00" \
 		"incorrect checksum" &&
+	cp commit-graph-pre-write-test $objdir/info/commit-graph &&
 	test_must_fail git fsck
+'
+
+test_expect_success 'rewrite commmit-graph with version 2' '
+	rm -f .git/objects/info/commit-graph &&
+	git commit-graph write --reachable --version=2 &&
+	git commit-graph verify
+'
+
+GRAPH_BYTE_CHUNK_COUNT=5
+GRAPH_BYTE_REACH_INDEX=6
+GRAPH_BYTE_UNUSED=7
+GRAPH_BYTE_HASH=8
+
+test_expect_success 'detect low chunk count (v2)' '
+	corrupt_graph_and_verify $GRAPH_BYTE_CHUNK_COUNT "\02" \
+		"missing the .* chunk"
+'
+
+test_expect_success 'detect incorrect reachability index' '
+	corrupt_graph_and_verify $GRAPH_BYTE_REACH_INDEX "\03" \
+		"reachability index version"
+'
+
+test_expect_success 'detect non-zero unused byte' '
+	corrupt_graph_and_verify $GRAPH_BYTE_UNUSED "\01" \
+		"unsupported value"
+'
+
+test_expect_success 'detect bad hash version (v2)' '
+	corrupt_graph_and_verify $GRAPH_BYTE_HASH "\00" \
+		"hash algorithm"
 '
 
 test_expect_success 'setup non-the_repository tests' '

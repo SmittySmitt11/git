@@ -314,7 +314,6 @@ static int fetch_refs_via_pack(struct transport *transport,
 	int ret = 0;
 	struct git_transport_data *data = transport->data;
 	struct ref *refs = NULL;
-	char *dest = xstrdup(transport->url);
 	struct fetch_pack_args args;
 	struct ref *refs_tmp = NULL;
 
@@ -356,17 +355,17 @@ static int fetch_refs_via_pack(struct transport *transport,
 
 	switch (data->version) {
 	case protocol_v2:
-		refs = fetch_pack(&args, data->fd, data->conn,
+		refs = fetch_pack(&args, data->fd,
 				  refs_tmp ? refs_tmp : transport->remote_refs,
-				  dest, to_fetch, nr_heads, &data->shallow,
-				  &transport->pack_lockfile, data->version);
+				  to_fetch, nr_heads, &data->shallow,
+				  &transport->pack_lockfiles, data->version);
 		break;
 	case protocol_v1:
 	case protocol_v0:
-		refs = fetch_pack(&args, data->fd, data->conn,
+		refs = fetch_pack(&args, data->fd,
 				  refs_tmp ? refs_tmp : transport->remote_refs,
-				  dest, to_fetch, nr_heads, &data->shallow,
-				  &transport->pack_lockfile, data->version);
+				  to_fetch, nr_heads, &data->shallow,
+				  &transport->pack_lockfiles, data->version);
 		break;
 	case protocol_unknown_version:
 		BUG("unknown protocol version");
@@ -389,7 +388,6 @@ static int fetch_refs_via_pack(struct transport *transport,
 
 	free_refs(refs_tmp);
 	free_refs(refs);
-	free(dest);
 	return ret;
 }
 
@@ -909,6 +907,7 @@ struct transport *transport_get(struct remote *remote, const char *url)
 	struct transport *ret = xcalloc(1, sizeof(*ret));
 
 	ret->progress = isatty(2);
+	string_list_init(&ret->pack_lockfiles, 1);
 
 	if (!remote)
 		BUG("No remote provided to transport_get()");
@@ -1303,10 +1302,11 @@ int transport_fetch_refs(struct transport *transport, struct ref *refs)
 
 void transport_unlock_pack(struct transport *transport)
 {
-	if (transport->pack_lockfile) {
-		unlink_or_warn(transport->pack_lockfile);
-		FREE_AND_NULL(transport->pack_lockfile);
-	}
+	int i;
+
+	for (i = 0; i < transport->pack_lockfiles.nr; i++)
+		unlink_or_warn(transport->pack_lockfiles.items[i].string);
+	string_list_clear(&transport->pack_lockfiles, 0);
 }
 
 int transport_connect(struct transport *transport, const char *name,

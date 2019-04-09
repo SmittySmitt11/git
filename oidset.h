@@ -16,18 +16,6 @@
  *      table overhead.
  */
 
-static inline unsigned int oid_hash(struct object_id oid)
-{
-	return sha1hash(oid.hash);
-}
-
-static inline int oid_equal(struct object_id a, struct object_id b)
-{
-	return oideq(&a, &b);
-}
-
-KHASH_INIT(oid, struct object_id, int, 0, oid_hash, oid_equal)
-
 /**
  * A single oidset; should be zero-initialized (or use OIDSET_INIT).
  */
@@ -72,6 +60,14 @@ int oidset_remove(struct oidset *set, const struct object_id *oid);
  * it.
  */
 void oidset_clear(struct oidset *set);
+
+/**
+ * Add the contents of the file 'path' to an initialized oidset.  Each line is
+ * an unabbreviated object name.  Comments begin with '#', and trailing comments
+ * are allowed.  Leading whitespace and empty or white-space only lines are
+ * ignored.
+ */
+void oidset_parse_file(struct oidset *set, const char *path);
 
 struct oidset_iter {
 	kh_oid_t *set;

@@ -6,6 +6,8 @@
 #include "color.h"
 #include "utf8.h"
 
+static int disallow_abbreviated_options;
+
 #define OPT_SHORT 1
 #define OPT_UNSET 2
 
@@ -286,6 +288,8 @@ again:
 					     optname(options, flags));
 			if (*rest)
 				continue;
+			if (options->value)
+				*(int *)options->value = options->defval;
 			p->out[p->cpidx++] = arg - 2;
 			return PARSE_OPT_DONE;
 		}
@@ -343,6 +347,10 @@ is_abbreviated:
 		}
 		return get_value(p, options, all_opts, flags ^ opt_flags);
 	}
+
+	if (disallow_abbreviated_options && (ambiguous_option || abbrev_option))
+		die("disallowed abbreviated or ambiguous option '%.*s'",
+		    (int)(arg_end - arg), arg);
 
 	if (ambiguous_option) {
 		error(_("ambiguous option: %s "
@@ -523,8 +531,7 @@ static void show_negated_gitcomp(const struct option *opts, int nr_noopts)
 	}
 }
 
-static int show_gitcomp(struct parse_opt_ctx_t *ctx,
-			const struct option *opts)
+static int show_gitcomp(const struct option *opts)
 {
 	const struct option *original_opts = opts;
 	int nr_noopts = 0;
@@ -603,7 +610,7 @@ int parse_options_step(struct parse_opt_ctx_t *ctx,
 
 		/* lone --git-completion-helper is asked by git-completion.bash */
 		if (ctx->total == 1 && !strcmp(arg + 1, "-git-completion-helper"))
-			return show_gitcomp(ctx, options);
+			return show_gitcomp(options);
 
 		if (arg[1] != '-') {
 			ctx->opt = arg + 1;
@@ -707,6 +714,9 @@ int parse_options(int argc, const char **argv, const char *prefix,
 		  int flags)
 {
 	struct parse_opt_ctx_t ctx;
+
+	disallow_abbreviated_options =
+		git_env_bool("GIT_TEST_DISALLOW_ABBREVIATED_OPTIONS", 0);
 
 	parse_options_start(&ctx, argc, argv, prefix, options, flags);
 	switch (parse_options_step(&ctx, options, usagestr)) {

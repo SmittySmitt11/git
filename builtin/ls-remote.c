@@ -1,5 +1,6 @@
 #include "builtin.h"
 #include "cache.h"
+#include "protocol.h"
 #include "transport.h"
 #include "ref-filter.h"
 #include "remote.h"
@@ -67,8 +68,7 @@ int cmd_ls_remote(int argc, const char **argv, const char *prefix)
 		OPT_BIT(0, "refs", &flags, N_("do not show peeled tags"), REF_NORMAL),
 		OPT_BOOL(0, "get-url", &get_url,
 			 N_("take url.<base>.insteadOf into account")),
-		OPT_CALLBACK(0 , "sort", sorting_tail, N_("key"),
-			     N_("field name to sort on"), &parse_opt_ref_sorting),
+		OPT_REF_SORT(sorting_tail),
 		OPT_SET_INT_F(0, "exit-code", &status,
 			      N_("exit with exit code 2 if no matching refs are found"),
 			      2, PARSE_OPT_NOCOMPLETE),
@@ -79,6 +79,10 @@ int cmd_ls_remote(int argc, const char **argv, const char *prefix)
 	};
 
 	memset(&ref_array, 0, sizeof(ref_array));
+
+	register_allowed_protocol_version(protocol_v2);
+	register_allowed_protocol_version(protocol_v1);
+	register_allowed_protocol_version(protocol_v0);
 
 	argc = parse_options(argc, argv, prefix, options, ls_remote_usage,
 			     PARSE_OPT_STOP_AT_NON_OPTION);

@@ -16,6 +16,7 @@
 #include "send-pack.h"
 #include "protocol.h"
 #include "quote.h"
+#include "transport.h"
 
 static struct remote *remote;
 /* always ends with a trailing slash */
@@ -153,7 +154,7 @@ static int set_option(const char *name, const char *value)
 		else {
 			struct strbuf unquoted = STRBUF_INIT;
 			if (unquote_c_style(&unquoted, value, NULL) < 0)
-				die("invalid quoting in push-option value");
+				die(_("invalid quoting in push-option value: '%s'"), value);
 			string_list_append_nodup(&options.push_options,
 						 strbuf_detach(&unquoted, NULL));
 		}
@@ -249,9 +250,9 @@ static struct ref *parse_info_refs(struct discovery *heads)
 		if (data[i] == '\t')
 			mid = &data[i];
 		if (data[i] == '\n') {
-			if (mid - start != 40)
-				die("%sinfo/refs not valid: is this a git repository?",
-				    url.buf);
+			if (mid - start != the_hash_algo->hexsz)
+				die(_("%sinfo/refs not valid: is this a git repository?"),
+				    transport_anonymize_url(url.buf));
 			data[i] = 0;
 			ref_name = mid + 1;
 			ref = alloc_ref(ref_name);
@@ -331,6 +332,19 @@ static int get_protocol_http_header(enum protocol_version version,
 	return 0;
 }
 
+static int get_client_protocol_http_header(const struct strbuf *version_advert,
+					   struct strbuf *header)
+{
+	if (version_advert->len > 0) {
+		strbuf_addf(header, GIT_PROTOCOL_HEADER ": %s",
+			    version_advert->buf);
+
+		return 1;
+	}
+
+	return 0;
+}
+
 static void check_smart_http(struct discovery *d, const char *service,
 			     struct strbuf *type)
 {
@@ -351,7 +365,7 @@ static void check_smart_http(struct discovery *d, const char *service,
 			   PACKET_READ_CHOMP_NEWLINE |
 			   PACKET_READ_DIE_ON_ERR_PACKET);
 	if (packet_reader_read(&reader) != PACKET_READ_NORMAL)
-		die("invalid server response; expected service, got flush packet");
+		die(_("invalid server response; expected service, got flush packet"));
 
 	if (skip_prefix(reader.line, "# service=", &p) && !strcmp(p, service)) {
 		/*
@@ -382,7 +396,7 @@ static void check_smart_http(struct discovery *d, const char *service,
 		d->proto_git = 1;
 
 	} else {
-		die("invalid server response; got '%s'", reader.line);
+		die(_("invalid server response; got '%s'"), reader.line);
 	}
 }
 
@@ -394,11 +408,11 @@ static struct discovery *discover_refs(const char *service, int for_push)
 	struct strbuf refs_url = STRBUF_INIT;
 	struct strbuf effective_url = STRBUF_INIT;
 	struct strbuf protocol_header = STRBUF_INIT;
+	struct strbuf version_advert = STRBUF_INIT;
 	struct string_list extra_headers = STRING_LIST_INIT_DUP;
 	struct discovery *last = last_discovery;
 	int http_ret, maybe_smart = 0;
 	struct http_get_options http_options;
-	enum protocol_version version = get_protocol_version_config();
 
 	if (last && !strcmp(service, last->service))
 		return last;
@@ -415,16 +429,10 @@ static struct discovery *discover_refs(const char *service, int for_push)
 		strbuf_addf(&refs_url, "service=%s", service);
 	}
 
-	/*
-	 * NEEDSWORK: If we are trying to use protocol v2 and we are planning
-	 * to perform a push, then fallback to v0 since the client doesn't know
-	 * how to push yet using v2.
-	 */
-	if (version == protocol_v2 && !strcmp("git-receive-pack", service))
-		version = protocol_v0;
+	get_client_protocol_version_advertisement(&version_advert);
 
 	/* Add the extra Git-Protocol header */
-	if (get_protocol_http_header(version, &protocol_header))
+	if (get_client_protocol_http_header(&version_advert, &protocol_header))
 		string_list_append(&extra_headers, protocol_header.buf);
 
 	memset(&http_options, 0, sizeof(http_options));
@@ -442,17 +450,23 @@ static struct discovery *discover_refs(const char *service, int for_push)
 		break;
 	case HTTP_MISSING_TARGET:
 		show_http_message(&type, &charset, &buffer);
-		die("repository '%s' not found", url.buf);
+		die(_("repository '%s' not found"),
+		    transport_anonymize_url(url.buf));
 	case HTTP_NOAUTH:
 		show_http_message(&type, &charset, &buffer);
-		die("Authentication failed for '%s'", url.buf);
+		die(_("Authentication failed for '%s'"),
+		    transport_anonymize_url(url.buf));
 	default:
 		show_http_message(&type, &charset, &buffer);
-		die("unable to access '%s': %s", url.buf, curl_errorstr);
+		die(_("unable to access '%s': %s"),
+		    transport_anonymize_url(url.buf), curl_errorstr);
 	}
 
-	if (options.verbosity && !starts_with(refs_url.buf, url.buf))
-		warning(_("redirecting to %s"), url.buf);
+	if (options.verbosity && !starts_with(refs_url.buf, url.buf)) {
+		char *u = transport_anonymize_url(url.buf);
+		warning(_("redirecting to %s"), u);
+		free(u);
+	}
 
 	last= xcalloc(1, sizeof(*last_discovery));
 	last->service = xstrdup(service);
@@ -574,7 +588,7 @@ static int rpc_read_from_out(struct rpc_state *rpc, int options,
 		switch (*status) {
 		case PACKET_READ_EOF:
 			if (!(options & PACKET_READ_GENTLE_ON_EOF))
-				die("shouldn't have EOF when not gentle on EOF");
+				die(_("shouldn't have EOF when not gentle on EOF"));
 			break;
 		case PACKET_READ_NORMAL:
 			set_packet_header(buf - 4, *appended);
@@ -654,7 +668,7 @@ static curlioerr rpc_ioctl(CURL *handle, int cmd, void *clientp)
 			rpc->pos = 0;
 			return CURLIOE_OK;
 		}
-		error("unable to rewind rpc post data - try increasing http.postBuffer");
+		error(_("unable to rewind rpc post data - try increasing http.postBuffer"));
 		return CURLIOE_FAILRESTART;
 
 	default:
@@ -714,7 +728,7 @@ static int run_slot(struct active_request_slot *slot,
 				strbuf_addstr(&msg, curl_errorstr);
 			}
 		}
-		error("RPC failed; %s", msg.buf);
+		error(_("RPC failed; %s"), msg.buf);
 		strbuf_release(&msg);
 	}
 
@@ -754,7 +768,7 @@ static curl_off_t xcurl_off_t(size_t len)
 {
 	uintmax_t size = len;
 	if (size > maximum_signed_value_of_type(curl_off_t))
-		die("cannot handle pushes this big");
+		die(_("cannot handle pushes this big"));
 	return (curl_off_t)size;
 }
 
@@ -869,11 +883,11 @@ retry:
 
 		ret = git_deflate(&stream, Z_FINISH);
 		if (ret != Z_STREAM_END)
-			die("cannot deflate request; zlib deflate error %d", ret);
+			die(_("cannot deflate request; zlib deflate error %d"), ret);
 
 		ret = git_deflate_end_gently(&stream);
 		if (ret != Z_OK)
-			die("cannot deflate request; zlib end error %d", ret);
+			die(_("cannot deflate request; zlib end error %d"), ret);
 
 		gzip_size = stream.total_out;
 
@@ -1004,7 +1018,7 @@ static int fetch_dumb(int nr_heads, struct ref **to_fetch)
 
 	ALLOC_ARRAY(targets, nr_heads);
 	if (options.depth || options.deepen_since)
-		die("dumb http transport does not support shallow capabilities");
+		die(_("dumb http transport does not support shallow capabilities"));
 	for (i = 0; i < nr_heads; i++)
 		targets[i] = xstrdup(oid_to_hex(&to_fetch[i]->old_oid));
 
@@ -1018,7 +1032,7 @@ static int fetch_dumb(int nr_heads, struct ref **to_fetch)
 		free(targets[i]);
 	free(targets);
 
-	return ret ? error("fetch failed.") : 0;
+	return ret ? error(_("fetch failed.")) : 0;
 }
 
 static int fetch_git(struct discovery *heads,
@@ -1066,7 +1080,7 @@ static int fetch_git(struct discovery *heads,
 	for (i = 0; i < nr_heads; i++) {
 		struct ref *ref = to_fetch[i];
 		if (!*ref->name)
-			die("cannot fetch by sha1 over smart http");
+			die(_("cannot fetch by sha1 over smart http"));
 		packet_buf_write(&preamble, "%s %s\n",
 				 oid_to_hex(&ref->old_oid), ref->name);
 	}
@@ -1107,15 +1121,16 @@ static void parse_fetch(struct strbuf *buf)
 			const char *name;
 			struct ref *ref;
 			struct object_id old_oid;
+			const char *q;
 
-			if (get_oid_hex(p, &old_oid))
-				die("protocol error: expected sha/ref, got %s'", p);
-			if (p[GIT_SHA1_HEXSZ] == ' ')
-				name = p + GIT_SHA1_HEXSZ + 1;
-			else if (!p[GIT_SHA1_HEXSZ])
+			if (parse_oid_hex(p, &old_oid, &q))
+				die(_("protocol error: expected sha/ref, got %s'"), p);
+			if (*q == ' ')
+				name = q + 1;
+			else if (!*q)
 				name = "";
 			else
-				die("protocol error: expected sha/ref, got %s'", p);
+				die(_("protocol error: expected sha/ref, got %s'"), p);
 
 			ref = alloc_ref(name);
 			oidcpy(&ref->old_oid, &old_oid);
@@ -1127,7 +1142,7 @@ static void parse_fetch(struct strbuf *buf)
 			to_fetch[nr_heads++] = ref;
 		}
 		else
-			die("http transport does not support %s", buf->buf);
+			die(_("http transport does not support %s"), buf->buf);
 
 		strbuf_reset(buf);
 		if (strbuf_getline_lf(buf, stdin) == EOF)
@@ -1163,7 +1178,7 @@ static int push_dav(int nr_spec, char **specs)
 		argv_array_push(&child.args, specs[i]);
 
 	if (run_command(&child))
-		die("git-http-push failed");
+		die(_("git-http-push failed"));
 	return 0;
 }
 
@@ -1241,7 +1256,7 @@ static void parse_push(struct strbuf *buf)
 			specs[nr_spec++] = xstrdup(buf->buf + 5);
 		}
 		else
-			die("http transport does not support %s", buf->buf);
+			die(_("http transport does not support %s"), buf->buf);
 
 		strbuf_reset(buf);
 		if (strbuf_getline_lf(buf, stdin) == EOF)
@@ -1347,9 +1362,11 @@ int cmd_main(int argc, const char **argv)
 	struct strbuf buf = STRBUF_INIT;
 	int nongit;
 
+	register_allowed_protocol_versions_from_env();
+
 	setup_git_directory_gently(&nongit);
 	if (argc < 2) {
-		error("remote-curl: usage: git remote-curl <remote> [<url>]");
+		error(_("remote-curl: usage: git remote-curl <remote> [<url>]"));
 		return 1;
 	}
 
@@ -1381,14 +1398,14 @@ int cmd_main(int argc, const char **argv)
 
 		if (strbuf_getline_lf(&buf, stdin) == EOF) {
 			if (ferror(stdin))
-				error("remote-curl: error reading command stream from git");
+				error(_("remote-curl: error reading command stream from git"));
 			return 1;
 		}
 		if (buf.len == 0)
 			break;
 		if (starts_with(buf.buf, "fetch ")) {
 			if (nongit)
-				die("remote-curl: fetch attempted without a local repo");
+				die(_("remote-curl: fetch attempted without a local repo"));
 			parse_fetch(&buf);
 
 		} else if (!strcmp(buf.buf, "list") || starts_with(buf.buf, "list ")) {
@@ -1428,7 +1445,7 @@ int cmd_main(int argc, const char **argv)
 			if (!stateless_connect(arg))
 				break;
 		} else {
-			error("remote-curl: unknown command '%s' from git", buf.buf);
+			error(_("remote-curl: unknown command '%s' from git"), buf.buf);
 			return 1;
 		}
 		strbuf_reset(&buf);

@@ -8,7 +8,7 @@ git-clean - Remove untracked files from the working tree
 SYNOPSIS
 --------
 [verse]
-'git clean' [-d] [-f] [-i] [-n] [-q] [-e <pattern>] [-x | -X] [--] <path>...
+'git clean' [<options>] [-d] [-f] [-i] [-n] [-x | -X] [--] <path>...
 
 DESCRIPTION
 -----------
@@ -63,12 +63,16 @@ OPTIONS
 	still use the ignore rules given with `-e` options from the command
 	line.  This allows removing all untracked
 	files, including build products.  This can be used (possibly in
-	conjunction with 'git reset') to create a pristine
+	conjunction with 'git restore' or 'git reset') to create a pristine
 	working directory to test a clean build.
 
 -X::
 	Remove only files ignored by Git.  This may be useful to rebuild
 	everything from scratch, but keep manually created files.
+
+--keep-precious::
+	Do not remove untracked or ignored files if they have
+	`precious` attribute.
 
 Interactive mode
 ----------------

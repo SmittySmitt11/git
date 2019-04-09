@@ -199,6 +199,23 @@ test_expect_success 'fetch packed objects' '
 	git clone $HTTPD_URL/dumb/repo_pack.git
 '
 
+test_expect_success 'http-fetch --packfile' '
+	git init packfileclient &&
+	p=$(cd "$HTTPD_DOCUMENT_ROOT_PATH"/repo_pack.git && ls objects/pack/pack-*.pack) &&
+	git -C packfileclient http-fetch --packfile "$HTTPD_URL"/dumb/repo_pack.git/$p >out &&
+
+	# Ensure that the expected files are generated
+	grep "^keep.[0-9a-f]\{16,\}$" out &&
+	cut -c6- out >packhash &&
+	test -e "packfileclient/.git/objects/pack/pack-$(cat packhash).pack" &&
+	test -e "packfileclient/.git/objects/pack/pack-$(cat packhash).idx" &&
+	test -e "packfileclient/.git/objects/pack/pack-$(cat packhash).keep" &&
+
+	# Ensure that it has the HEAD of repo_pack, at least
+	HASH=$(git -C "$HTTPD_DOCUMENT_ROOT_PATH"/repo_pack.git rev-parse HEAD) &&
+	git -C packfileclient cat-file -e "$HASH"
+'
+
 test_expect_success 'fetch notices corrupt pack' '
 	cp -R "$HTTPD_DOCUMENT_ROOT_PATH"/repo_pack.git "$HTTPD_DOCUMENT_ROOT_PATH"/repo_bad1.git &&
 	(cd "$HTTPD_DOCUMENT_ROOT_PATH"/repo_bad1.git &&
@@ -212,6 +229,14 @@ test_expect_success 'fetch notices corrupt pack' '
 	 test_must_fail git --bare fetch $HTTPD_URL/dumb/repo_bad1.git &&
 	 test 0 = $(ls objects/pack/pack-*.pack | wc -l)
 	)
+'
+
+test_expect_success 'http-fetch --packfile with corrupt pack' '
+	rm -rf packfileclient &&
+	git init packfileclient &&
+	p=$(cd "$HTTPD_DOCUMENT_ROOT_PATH"/repo_bad1.git && ls objects/pack/pack-*.pack) &&
+	test_must_fail git -C packfileclient http-fetch --packfile \
+		"$HTTPD_URL"/dumb/repo_bad1.git/$p
 '
 
 test_expect_success 'fetch notices corrupt idx' '
@@ -408,5 +433,20 @@ test_expect_success 'print HTTP error when any intermediate redirect throws erro
 	test_i18ngrep "unable to access.*/redir-to/502" stderr
 '
 
-stop_httpd
+test_expect_success 'fetching via http alternates works' '
+	parent=$HTTPD_DOCUMENT_ROOT_PATH/alt-parent.git &&
+	git init --bare "$parent" &&
+	git -C "$parent" --work-tree=. commit --allow-empty -m foo &&
+	git -C "$parent" update-server-info &&
+	commit=$(git -C "$parent" rev-parse HEAD) &&
+
+	child=$HTTPD_DOCUMENT_ROOT_PATH/alt-child.git &&
+	git init --bare "$child" &&
+	echo "../../alt-parent.git/objects" >"$child/objects/info/alternates" &&
+	git -C "$child" update-ref HEAD $commit &&
+	git -C "$child" update-server-info &&
+
+	git -c http.followredirects=true clone "$HTTPD_URL/dumb/alt-child.git"
+'
+
 test_done

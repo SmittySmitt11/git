@@ -136,6 +136,15 @@ static inline int missing__target(int code, int result)
 
 #define missing_target(a) missing__target((a)->http_code, (a)->curl_result)
 
+/*
+ * Normalize curl results to handle CURL_FAILONERROR (or lack thereof). Failing
+ * http codes have their "result" converted to CURLE_HTTP_RETURNED_ERROR, and
+ * an appropriate string placed in the errorstr buffer (pass curl_errorstr if
+ * you don't have a custom buffer).
+ */
+void normalize_curl_result(CURLcode *result, long http_code, char *errorstr,
+			   size_t errorlen);
+
 /* Helpers for modifying and creating URLs */
 extern void append_remote_object_url(struct strbuf *buf, const char *url,
 				     const char *hex,
@@ -202,14 +211,44 @@ extern int http_get_info_packs(const char *base_url,
 	struct packed_git **packs_head);
 
 struct http_pack_request {
+	/*
+	 * Initialized by new_http_pack_request().
+	 */
 	char *url;
 	struct packed_git *target;
+	struct active_request_slot *slot;
+
+	/*
+	 * After calling new_http_pack_request(), if fetching a pack that
+	 * http_get_info_packs() told us about, point lst to the head of the
+	 * pack list that target is in. finish_http_pack_request() will remove
+	 * target from lst and call install_packed_git() on target.
+	 */
 	struct packed_git **lst;
+
+	/*
+	 * If this is true, finish_http_pack_request() will pass "--keep" to
+	 * index-pack, resulting in the creation of a keep file, and will not
+	 * suppress its stdout (that is, the "keep\t<hash>\n" line will be
+	 * printed to stdout).
+	 */
+	unsigned generate_keep : 1;
+
+	/*
+	 * State managed by functions in http.c.
+	 */
 	FILE *packfile;
 	struct strbuf tmpfile;
-	struct active_request_slot *slot;
 };
 
+/*
+ * If fetching a pack that http_get_info_packs() told us about, set target to
+ * an element in a pack list obtained from http_get_info_packs(). The actual
+ * URL fetched will be base_url followed by a suffix with the hash of the pack.
+ *
+ * Otherwise, set target to NULL. The actual URL fetched will be base_url
+ * itself.
+ */
 extern struct http_pack_request *new_http_pack_request(
 	struct packed_git *target, const char *base_url);
 extern int finish_http_pack_request(struct http_pack_request *preq);
@@ -225,7 +264,7 @@ struct http_object_request {
 	long http_code;
 	struct object_id oid;
 	struct object_id real_oid;
-	git_SHA_CTX c;
+	git_hash_ctx c;
 	git_zstream stream;
 	int zret;
 	int rename;

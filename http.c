@@ -1544,7 +1544,8 @@ char *get_remote_object_url(const char *url, const char *hex,
 	return strbuf_detach(&buf, NULL);
 }
 
-static int handle_curl_result(struct slot_results *results)
+void normalize_curl_result(CURLcode *result, long http_code,
+			   char *errorstr, size_t errorlen)
 {
 	/*
 	 * If we see a failing http code with CURLE_OK, we have turned off
@@ -1554,19 +1555,24 @@ static int handle_curl_result(struct slot_results *results)
 	 * Likewise, if we see a redirect (30x code), that means we turned off
 	 * redirect-following, and we should treat the result as an error.
 	 */
-	if (results->curl_result == CURLE_OK &&
-	    results->http_code >= 300) {
-		results->curl_result = CURLE_HTTP_RETURNED_ERROR;
+	if (*result == CURLE_OK && http_code >= 300) {
+		*result = CURLE_HTTP_RETURNED_ERROR;
 		/*
 		 * Normally curl will already have put the "reason phrase"
 		 * from the server into curl_errorstr; unfortunately without
 		 * FAILONERROR it is lost, so we can give only the numeric
 		 * status code.
 		 */
-		xsnprintf(curl_errorstr, sizeof(curl_errorstr),
+		xsnprintf(errorstr, errorlen,
 			  "The requested URL returned error: %ld",
-			  results->http_code);
+			  http_code);
 	}
+}
+
+static int handle_curl_result(struct slot_results *results)
+{
+	normalize_curl_result(&results->curl_result, results->http_code,
+			      curl_errorstr, sizeof(curl_errorstr));
 
 	if (results->curl_result == CURLE_OK) {
 		credential_approve(&http_auth);
@@ -1996,12 +2002,12 @@ static int http_request_reauth(const char *url,
 		strbuf_reset(result);
 		break;
 	case HTTP_REQUEST_FILE:
-		if (fflush(result)) {
+		if (fflush((FILE *)result)) {
 			error_errno("unable to flush a file");
 			return HTTP_START_FAILED;
 		}
-		rewind(result);
-		if (ftruncate(fileno(result), 0) < 0) {
+		rewind((FILE *)result);
+		if (ftruncate(fileno((FILE *)result), 0) < 0) {
 			error_errno("unable to truncate a file");
 			return HTTP_START_FAILED;
 		}
@@ -2065,7 +2071,7 @@ int http_fetch_ref(const char *base, struct ref *ref)
 	url = quote_ref_url(base, ref->name);
 	if (http_get_strbuf(url, &buffer, &options) == HTTP_OK) {
 		strbuf_rtrim(&buffer);
-		if (buffer.len == 40)
+		if (buffer.len == the_hash_algo->hexsz)
 			ret = get_oid_hex(buffer.buf, &ref->old_oid);
 		else if (starts_with(buffer.buf, "ref: ")) {
 			ref->symref = xstrdup(buffer.buf + 5);
@@ -2079,19 +2085,19 @@ int http_fetch_ref(const char *base, struct ref *ref)
 }
 
 /* Helpers for fetching packs */
-static char *fetch_pack_index(unsigned char *sha1, const char *base_url)
+static char *fetch_pack_index(unsigned char *hash, const char *base_url)
 {
 	char *url, *tmp;
 	struct strbuf buf = STRBUF_INIT;
 
 	if (http_is_verbose)
-		fprintf(stderr, "Getting index for pack %s\n", sha1_to_hex(sha1));
+		fprintf(stderr, "Getting index for pack %s\n", hash_to_hex(hash));
 
 	end_url_with_slash(&buf, base_url);
-	strbuf_addf(&buf, "objects/pack/pack-%s.idx", sha1_to_hex(sha1));
+	strbuf_addf(&buf, "objects/pack/pack-%s.idx", hash_to_hex(hash));
 	url = strbuf_detach(&buf, NULL);
 
-	strbuf_addf(&buf, "%s.temp", sha1_pack_index_name(sha1));
+	strbuf_addf(&buf, "%s.temp", sha1_pack_index_name(hash));
 	tmp = strbuf_detach(&buf, NULL);
 
 	if (http_get_file(url, tmp, NULL) != HTTP_OK) {
@@ -2147,11 +2153,11 @@ add_pack:
 int http_get_info_packs(const char *base_url, struct packed_git **packs_head)
 {
 	struct http_get_options options = {0};
-	int ret = 0, i = 0;
-	char *url, *data;
+	int ret = 0;
+	char *url;
+	const char *data;
 	struct strbuf buf = STRBUF_INIT;
-	unsigned char hash[GIT_MAX_RAWSZ];
-	const unsigned hexsz = the_hash_algo->hexsz;
+	struct object_id oid;
 
 	end_url_with_slash(&buf, base_url);
 	strbuf_addstr(&buf, "objects/info/packs");
@@ -2163,24 +2169,17 @@ int http_get_info_packs(const char *base_url, struct packed_git **packs_head)
 		goto cleanup;
 
 	data = buf.buf;
-	while (i < buf.len) {
-		switch (data[i]) {
-		case 'P':
-			i++;
-			if (i + hexsz + 12 <= buf.len &&
-			    starts_with(data + i, " pack-") &&
-			    starts_with(data + i + hexsz + 6, ".pack\n")) {
-				get_sha1_hex(data + i + 6, hash);
-				fetch_and_setup_pack_index(packs_head, hash,
-						      base_url);
-				i += hexsz + 11;
-				break;
-			}
-		default:
-			while (i < buf.len && data[i] != '\n')
-				i++;
+	while (*data) {
+		if (skip_prefix(data, "P pack-", &data) &&
+		    !parse_oid_hex(data, &oid, &data) &&
+		    skip_prefix(data, ".pack", &data) &&
+		    (*data == '\n' || *data == '\0')) {
+			fetch_and_setup_pack_index(packs_head, oid.hash, base_url);
+		} else {
+			data = strchrnul(data, '\n');
 		}
-		i++;
+		if (*data)
+			data++; /* skip past newline */
 	}
 
 cleanup:
@@ -2204,49 +2203,48 @@ int finish_http_pack_request(struct http_pack_request *preq)
 {
 	struct packed_git **lst;
 	struct packed_git *p = preq->target;
-	char *tmp_idx;
-	size_t len;
 	struct child_process ip = CHILD_PROCESS_INIT;
+	int tmpfile_fd;
+	int ret = 0;
 
-	close_pack_index(p);
+	if (p)
+		close_pack_index(p);
 
 	fclose(preq->packfile);
 	preq->packfile = NULL;
 
-	lst = preq->lst;
-	while (*lst != p)
-		lst = &((*lst)->next);
-	*lst = (*lst)->next;
+	if (p) {
+		lst = preq->lst;
+		while (*lst != p)
+			lst = &((*lst)->next);
+		*lst = (*lst)->next;
+	}
 
-	if (!strip_suffix(preq->tmpfile.buf, ".pack.temp", &len))
-		BUG("pack tmpfile does not end in .pack.temp?");
-	tmp_idx = xstrfmt("%.*s.idx.temp", (int)len, preq->tmpfile.buf);
+	tmpfile_fd = xopen(preq->tmpfile.buf, O_RDONLY);
 
 	argv_array_push(&ip.args, "index-pack");
-	argv_array_pushl(&ip.args, "-o", tmp_idx, NULL);
-	argv_array_push(&ip.args, preq->tmpfile.buf);
+	argv_array_push(&ip.args, "--stdin");
 	ip.git_cmd = 1;
-	ip.no_stdin = 1;
-	ip.no_stdout = 1;
+	ip.in = tmpfile_fd;
+	if (preq->generate_keep) {
+		argv_array_pushf(&ip.args, "--keep=git %"PRIuMAX,
+				 (uintmax_t)getpid());
+		ip.out = 0;
+	} else {
+		ip.no_stdout = 1;
+	}
 
 	if (run_command(&ip)) {
-		unlink(preq->tmpfile.buf);
-		unlink(tmp_idx);
-		free(tmp_idx);
-		return -1;
+		ret = -1;
+		goto cleanup;
 	}
 
-	unlink(sha1_pack_index_name(p->sha1));
-
-	if (finalize_object_file(preq->tmpfile.buf, sha1_pack_name(p->sha1))
-	 || finalize_object_file(tmp_idx, sha1_pack_index_name(p->sha1))) {
-		free(tmp_idx);
-		return -1;
-	}
-
-	install_packed_git(the_repository, p);
-	free(tmp_idx);
-	return 0;
+	if (p)
+		install_packed_git(the_repository, p);
+cleanup:
+	close(tmpfile_fd);
+	unlink(preq->tmpfile.buf);
+	return ret;
 }
 
 struct http_pack_request *new_http_pack_request(
@@ -2260,12 +2258,24 @@ struct http_pack_request *new_http_pack_request(
 	strbuf_init(&preq->tmpfile, 0);
 	preq->target = target;
 
-	end_url_with_slash(&buf, base_url);
-	strbuf_addf(&buf, "objects/pack/pack-%s.pack",
-		sha1_to_hex(target->sha1));
-	preq->url = strbuf_detach(&buf, NULL);
+	if (target) {
+		end_url_with_slash(&buf, base_url);
+		strbuf_addf(&buf, "objects/pack/pack-%s.pack",
+			hash_to_hex(target->hash));
+		preq->url = strbuf_detach(&buf, NULL);
+	} else {
+		preq->url = xstrdup(base_url);
+	}
 
-	strbuf_addf(&preq->tmpfile, "%s.temp", sha1_pack_name(target->sha1));
+	if (target) {
+		strbuf_addf(&preq->tmpfile, "%s.temp",
+			    sha1_pack_name(target->hash));
+	} else {
+		strbuf_addf(&preq->tmpfile, "%s/pack/pack-", get_object_directory());
+		strbuf_addstr_urlencode(&preq->tmpfile, base_url, 1);
+		strbuf_addstr(&preq->tmpfile, ".temp");
+	}
+
 	preq->packfile = fopen(preq->tmpfile.buf, "a");
 	if (!preq->packfile) {
 		error("Unable to open local file %s for pack",
@@ -2289,7 +2299,8 @@ struct http_pack_request *new_http_pack_request(
 		if (http_is_verbose)
 			fprintf(stderr,
 				"Resuming fetch of pack %s at byte %"PRIuMAX"\n",
-				sha1_to_hex(target->sha1), (uintmax_t)prev_posn);
+				target ? hash_to_hex(target->hash) : base_url,
+				(uintmax_t)prev_posn);
 		http_opt_request_remainder(preq->slot->curl, prev_posn);
 	}
 
@@ -2336,8 +2347,8 @@ static size_t fwrite_sha1_file(char *ptr, size_t eltsize, size_t nmemb,
 		freq->stream.next_out = expn;
 		freq->stream.avail_out = sizeof(expn);
 		freq->zret = git_inflate(&freq->stream, Z_SYNC_FLUSH);
-		git_SHA1_Update(&freq->c, expn,
-				sizeof(expn) - freq->stream.avail_out);
+		the_hash_algo->update_fn(&freq->c, expn,
+					 sizeof(expn) - freq->stream.avail_out);
 	} while (freq->stream.avail_in && freq->zret == Z_OK);
 	return size;
 }
@@ -2395,7 +2406,7 @@ struct http_object_request *new_http_object_request(const char *base_url,
 
 	git_inflate_init(&freq->stream);
 
-	git_SHA1_Init(&freq->c);
+	the_hash_algo->init_fn(&freq->c);
 
 	freq->url = get_remote_object_url(base_url, hex, 0);
 
@@ -2430,7 +2441,7 @@ struct http_object_request *new_http_object_request(const char *base_url,
 	if (prev_read == -1) {
 		memset(&freq->stream, 0, sizeof(freq->stream));
 		git_inflate_init(&freq->stream);
-		git_SHA1_Init(&freq->c);
+		the_hash_algo->init_fn(&freq->c);
 		if (prev_posn>0) {
 			prev_posn = 0;
 			lseek(freq->localfile, 0, SEEK_SET);
@@ -2501,7 +2512,7 @@ int finish_http_object_request(struct http_object_request *freq)
 	}
 
 	git_inflate_end(&freq->stream);
-	git_SHA1_Final(freq->real_oid.hash, &freq->c);
+	the_hash_algo->final_fn(freq->real_oid.hash, &freq->c);
 	if (freq->zret != Z_STREAM_END) {
 		unlink_or_warn(freq->tmpfile.buf);
 		return -1;

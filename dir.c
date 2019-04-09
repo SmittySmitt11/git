@@ -502,8 +502,7 @@ int submodule_path_match(const struct index_state *istate,
 }
 
 int report_path_error(const char *ps_matched,
-		      const struct pathspec *pathspec,
-		      const char *prefix)
+		      const struct pathspec *pathspec)
 {
 	/*
 	 * Make sure all pathspec matched; otherwise it is an error.
@@ -1467,9 +1466,11 @@ static enum path_treatment treat_directory(struct dir_struct *dir,
 			return path_none;
 		}
 		if (!(dir->flags & DIR_NO_GITLINKS)) {
-			struct object_id oid;
-			if (resolve_gitlink_ref(dirname, "HEAD", &oid) == 0)
+			struct strbuf sb = STRBUF_INIT;
+			strbuf_addstr(&sb, dirname);
+			if (is_nonbare_repository_dir(&sb))
 				return exclude ? path_excluded : path_untracked;
+			strbuf_release(&sb);
 		}
 		return path_recurse;
 	}
@@ -2315,6 +2316,14 @@ int file_exists(const char *f)
 	return lstat(f, &sb) == 0;
 }
 
+int repo_file_exists(struct repository *repo, const char *path)
+{
+	if (repo != the_repository)
+		BUG("do not know how to check file existence in arbitrary repo");
+
+	return file_exists(path);
+}
+
 static int cmp_icase(char a, char b)
 {
 	if (a == b)
@@ -2545,13 +2554,9 @@ struct ondisk_untracked_cache {
 	struct stat_data info_exclude_stat;
 	struct stat_data excludes_file_stat;
 	uint32_t dir_flags;
-	unsigned char info_exclude_sha1[20];
-	unsigned char excludes_file_sha1[20];
-	char exclude_per_dir[FLEX_ARRAY];
 };
 
 #define ouc_offset(x) offsetof(struct ondisk_untracked_cache, x)
-#define ouc_size(len) (ouc_offset(exclude_per_dir) + len + 1)
 
 struct write_data {
 	int index;	   /* number of written untracked_cache_dir */
@@ -2634,20 +2639,21 @@ void write_untracked_extension(struct strbuf *out, struct untracked_cache *untra
 	struct write_data wd;
 	unsigned char varbuf[16];
 	int varint_len;
-	size_t len = strlen(untracked->exclude_per_dir);
+	const unsigned hashsz = the_hash_algo->rawsz;
 
-	FLEX_ALLOC_MEM(ouc, exclude_per_dir, untracked->exclude_per_dir, len);
+	ouc = xcalloc(1, sizeof(*ouc));
 	stat_data_to_disk(&ouc->info_exclude_stat, &untracked->ss_info_exclude.stat);
 	stat_data_to_disk(&ouc->excludes_file_stat, &untracked->ss_excludes_file.stat);
-	hashcpy(ouc->info_exclude_sha1, untracked->ss_info_exclude.oid.hash);
-	hashcpy(ouc->excludes_file_sha1, untracked->ss_excludes_file.oid.hash);
 	ouc->dir_flags = htonl(untracked->dir_flags);
 
 	varint_len = encode_varint(untracked->ident.len, varbuf);
 	strbuf_add(out, varbuf, varint_len);
 	strbuf_addbuf(out, &untracked->ident);
 
-	strbuf_add(out, ouc, ouc_size(len));
+	strbuf_add(out, ouc, sizeof(*ouc));
+	strbuf_add(out, untracked->ss_info_exclude.oid.hash, hashsz);
+	strbuf_add(out, untracked->ss_excludes_file.oid.hash, hashsz);
+	strbuf_add(out, untracked->exclude_per_dir, strlen(untracked->exclude_per_dir) + 1);
 	FREE_AND_NULL(ouc);
 
 	if (!untracked->root) {
@@ -2834,6 +2840,9 @@ struct untracked_cache *read_untracked_extension(const void *data, unsigned long
 	int ident_len;
 	ssize_t len;
 	const char *exclude_per_dir;
+	const unsigned hashsz = the_hash_algo->rawsz;
+	const unsigned offset = sizeof(struct ondisk_untracked_cache);
+	const unsigned exclude_per_dir_offset = offset + 2 * hashsz;
 
 	if (sz <= 1 || end[-1] != '\0')
 		return NULL;
@@ -2845,7 +2854,7 @@ struct untracked_cache *read_untracked_extension(const void *data, unsigned long
 	ident = (const char *)next;
 	next += ident_len;
 
-	if (next + ouc_size(0) > end)
+	if (next + exclude_per_dir_offset + 1 > end)
 		return NULL;
 
 	uc = xcalloc(1, sizeof(*uc));
@@ -2853,15 +2862,15 @@ struct untracked_cache *read_untracked_extension(const void *data, unsigned long
 	strbuf_add(&uc->ident, ident, ident_len);
 	load_oid_stat(&uc->ss_info_exclude,
 		      next + ouc_offset(info_exclude_stat),
-		      next + ouc_offset(info_exclude_sha1));
+		      next + offset);
 	load_oid_stat(&uc->ss_excludes_file,
 		      next + ouc_offset(excludes_file_stat),
-		      next + ouc_offset(excludes_file_sha1));
+		      next + offset + hashsz);
 	uc->dir_flags = get_be32(next + ouc_offset(dir_flags));
-	exclude_per_dir = (const char *)next + ouc_offset(exclude_per_dir);
+	exclude_per_dir = (const char *)next + exclude_per_dir_offset;
 	uc->exclude_per_dir = xstrdup(exclude_per_dir);
 	/* NUL after exclude_per_dir is covered by sizeof(*ouc) */
-	next += ouc_size(strlen(exclude_per_dir));
+	next += exclude_per_dir_offset + strlen(exclude_per_dir) + 1;
 	if (next >= end)
 		goto done2;
 
